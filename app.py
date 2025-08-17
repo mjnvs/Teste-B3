@@ -1,5 +1,18 @@
 # app.py (v2) — B3 EMA9/EMA21 + Volume EMA50 com correções para MultiIndex e dtypes
 # Requisitos: pip install streamlit yfinance plotly pandas python-dateutil
+
+# app.py (v2) — B3 EMA9/EMA21 + Volume EMA50 com correções para MultiIndex e dtypes
+# Requisitos: pip install streamlit yfinance plotly pandas python-dateutil
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import streamlit as st
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+
 import pandas as pd
 import numpy as np
 import yfinance as yf
