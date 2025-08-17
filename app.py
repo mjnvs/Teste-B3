@@ -1,4 +1,4 @@
-# app.py (v12) — EMA9/EMA21 + Regra de 3% (H=5/10/15/20) — com Ret_long_% e Ret_short_%
+# app.py (v14) — EMA9/EMA21 | Sucesso se atingir ±1% em 1 semana (5 pregões) | Saída semanal e retorno 4 semanas
 # Requisitos: pip install streamlit yfinance plotly pandas python-dateutil
 
 import pandas as pd
@@ -9,6 +9,9 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+
+H_WEEK = 5           # 1 semana de pregão (aprox.)
+THRESHOLD_PCT = 1.0  # alvo de 1%
 
 # ---------- Utils ----------
 def normalize_ticker_b3(t: str) -> str:
@@ -72,35 +75,32 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["BearCross"] = (out["EMA9"] < out["EMA21"]) & prev_dn
     return out
 
-# ---------- Avaliação 3% ----------
-def evaluate_three_percent_rule(df: pd.DataFrame, horizon: int, threshold_pct: float = 3.0) -> pd.DataFrame:
+# ---------- Avaliação semanal (5 pregões) ----------
+def start_of_week_monday(ts: pd.Timestamp) -> pd.Timestamp:
+    d = pd.Timestamp(ts).normalize()
+    return d - pd.Timedelta(days=d.weekday())
+
+def evaluate_weekly_threshold(df: pd.DataFrame) -> pd.DataFrame:
     """
     Para cada cruzamento:
-      - Direção ALTA: sucesso se, dentro de H dias, o HIGH tocar >= Entry * (1+3%).
-      - Direção BAIXA: sucesso se, dentro de H dias, o LOW  tocar <= Entry * (1-3%).
-      - Saída no primeiro toque; senão usa D+H.
-    Colunas extra:
-      - Ret_long_%  = (Exit / Entry - 1) * 100
-      - Ret_short_% = (Entry / Exit - 1) * 100
-      - Ret_%_direcao = retorno direcional (LONG para ALTA, SHORT para BAIXA);
-                        se bater o alvo, vale 3.00 por definição.
+      - ALTA: sucesso se, em até 5 pregões, HIGH >= Entry * (1 + 1%)
+      - BAIXA: sucesso se, em até 5 pregões, LOW  <= Entry * (1 - 1%)
+      - Saída no primeiro toque; senão usa D+5 (fechamento) como referência.
     """
     rows = []
     mask = df["BullCross"] | df["BearCross"]
     idxs = df.index[mask]
-    thr = threshold_pct / 100.0
+    thr = THRESHOLD_PCT / 100.0
 
     for ts in idxs:
         pos = df.index.get_loc(ts)
         entry = float(df.loc[ts, "Close"])
         direcao = "ALTA" if bool(df.loc[ts, "BullCross"]) else "BAIXA"
-
-        # Janela de avaliação
-        fpos = pos + horizon
+        fpos = pos + H_WEEK
         if fpos >= len(df.index):
             continue
 
-        window = df.iloc[pos+1:fpos+1]  # inclui D+H
+        window = df.iloc[pos+1:fpos+1]  # inclui D+5
         hit = False
         exit_dt = None
         exit_price = None
@@ -115,7 +115,7 @@ def evaluate_three_percent_rule(df: pd.DataFrame, horizon: int, threshold_pct: f
             else:
                 exit_dt = df.index[fpos]
                 exit_price = float(df.loc[exit_dt, "Close"])
-        else:  # BAIXA
+        else:
             target = entry * (1.0 - thr)
             hit_idx = window.index[window["Low"] <= target]
             if len(hit_idx) > 0:
@@ -126,65 +126,93 @@ def evaluate_three_percent_rule(df: pd.DataFrame, horizon: int, threshold_pct: f
                 exit_dt = df.index[fpos]
                 exit_price = float(df.loc[exit_dt, "Close"])
 
-        # Retornos
+        # Retornos auxiliares
         ret_long = (exit_price / entry - 1.0) * 100.0
         ret_short = (entry / exit_price - 1.0) * 100.0
-
         if hit:
-            ret_dir = threshold_pct  # por definição
+            ret_dir = THRESHOLD_PCT
             bars_to = int(df.index.get_loc(exit_dt) - pos)
         else:
-            if direcao == "ALTA":
-                ret_dir = ret_long
-            else:
-                ret_dir = ret_short
-            bars_to = int(horizon)
+            ret_dir = ret_long if direcao == "ALTA" else ret_short
+            bars_to = H_WEEK
 
         rows.append({
             "Data_Sinal": ts,
+            "Semana": start_of_week_monday(ts),
             "Direcao": direcao,
             "Entrada_Close": round(entry, 6),
-            "H_dias": horizon,
-            "Atingiu_3pct": bool(hit),
+            "Atingiu_1pct": bool(hit),
             "Data_Fechamento_Operacao": exit_dt,
             "Preco_Saida": round(exit_price, 6),
             "Barras_ate_evento": bars_to,
+            "Ret_%_direcao": round(ret_dir, 2),
             "Ret_long_%": round(ret_long, 2),
             "Ret_short_%": round(ret_short, 2),
-            "Ret_%_direcao": round(ret_dir, 2),
         })
 
     return pd.DataFrame(rows)
 
-def summarize_hits(df_eval: pd.DataFrame) -> dict:
-    if df_eval is None or df_eval.empty:
-        return {"n": 0}
-    n = len(df_eval)
-    hits = int(df_eval["Atingiu_3pct"].sum())
+def weekly_summary(eval_df: pd.DataFrame) -> pd.DataFrame:
+    if eval_df is None or eval_df.empty:
+        return pd.DataFrame(columns=[
+            "Semana","Sinais","Acertos","Taxa_Sucesso_%",
+            "Sinais_Alta","Acertos_Alta","Sinais_Baixa","Acertos_Baixa"
+        ])
+    grp = eval_df.groupby("Semana")
+    out = grp.agg(
+        Sinais=("Atingiu_1pct","count"),
+        Acertos=("Atingiu_1pct","sum"),
+    ).reset_index()
+    out["Taxa_Sucesso_%"] = (out["Acertos"] / out["Sinais"] * 100).round(2)
+
+    # Quebra por direção
+    by_dir = eval_df.groupby(["Semana","Direcao"])["Atingiu_1pct"].agg(["count","sum"]).reset_index()
+    piv_cnt = by_dir.pivot(index="Semana", columns="Direcao", values="count").fillna(0).rename(
+        columns={"ALTA":"Sinais_Alta","BAIXA":"Sinais_Baixa"}
+    )
+    piv_hit = by_dir.pivot(index="Semana", columns="Direcao", values="sum").fillna(0).rename(
+        columns={"ALTA":"Acertos_Alta","BAIXA":"Acertos_Baixa"}
+    )
+    out = out.set_index("Semana").join(piv_cnt).join(piv_hit).fillna(0).reset_index()
+    for c in ["Sinais","Acertos","Sinais_Alta","Acertos_Alta","Sinais_Baixa","Acertos_Baixa"]:
+        out[c] = out[c].astype(int)
+    return out.sort_values("Semana")
+
+def overall_counts(eval_df: pd.DataFrame) -> dict:
+    if eval_df is None or eval_df.empty:
+        return {"total":0}
+    n = len(eval_df)
+    hits = int(eval_df["Atingiu_1pct"].sum())
     misses = n - hits
     hit_pct = round(100.0 * hits / n, 2)
     miss_pct = round(100.0 * misses / n, 2)
-    bull = df_eval[df_eval["Direcao"] == "ALTA"]
-    bear = df_eval[df_eval["Direcao"] == "BAIXA"]
-    bh = int(bull["Atingiu_3pct"].sum())
-    sh = int(bear["Atingiu_3pct"].sum())
+    bull = eval_df[eval_df["Direcao"]=="ALTA"]
+    bear = eval_df[eval_df["Direcao"]=="BAIXA"]
     return {
-        "n": n,
+        "total": n,
         "hits": hits,
         "misses": misses,
         "hit_pct_%": hit_pct,
         "miss_pct_%": miss_pct,
-        "bull_hits": bh,
-        "bear_hits": sh,
         "bull_total": len(bull),
+        "bull_hits": int(bull["Atingiu_1pct"].sum()),
         "bear_total": len(bear),
+        "bear_hits": int(bear["Atingiu_1pct"].sum()),
     }
+
+def asset_return_last_4_weeks(df: pd.DataFrame) -> float | None:
+    if len(df) < 21:
+        return None
+    last = float(df["Close"].iloc[-1])
+    prev = float(df["Close"].shift(20).iloc[-1])
+    if np.isnan(prev) or prev == 0.0:
+        return None
+    return round((last / prev - 1.0) * 100.0, 2)
 
 # ---------- Plot ----------
 def plot_chart(df: pd.DataFrame, eval_df: pd.DataFrame, ticker_in: str):
     fig = make_subplots(rows=1, cols=1)
 
-    # Candlestick com cores: verde (alta), vermelho (baixa)
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["Open"], high=df["High"],
         low=df["Low"], close=df["Close"], name="Candles",
@@ -192,29 +220,27 @@ def plot_chart(df: pd.DataFrame, eval_df: pd.DataFrame, ticker_in: str):
         decreasing_line_color="red", decreasing_fillcolor="red"
     ), row=1, col=1)
 
-    # EMAs
     fig.add_trace(go.Scatter(x=df.index, y=df["EMA9"], mode="lines", name="EMA 9"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["EMA21"], mode="lines", name="EMA 21"), row=1, col=1)
 
-    # Marcadores: sinal de cruzamento colorido por sucesso (atingiu 3% no H) vs não
     if eval_df is not None and not eval_df.empty:
-        succ = eval_df[eval_df["Atingiu_3pct"] == True]
-        fail = eval_df[eval_df["Atingiu_3pct"] == False]
+        succ = eval_df[eval_df["Atingiu_1pct"] == True]
+        fail = eval_df[eval_df["Atingiu_1pct"] == False]
         if not succ.empty:
             fig.add_trace(go.Scatter(
                 x=succ["Data_Sinal"], y=[df.loc[d, "Close"] for d in succ["Data_Sinal"]],
-                mode="markers", name="Sinal (atingiu ≥3%)",
+                mode="markers", name="Sinal (atingiu ≥1% na semana)",
                 marker_symbol="star", marker_size=11
             ), row=1, col=1)
         if not fail.empty:
             fig.add_trace(go.Scatter(
                 x=fail["Data_Sinal"], y=[df.loc[d, "Close"] for d in fail["Data_Sinal"]],
-                mode="markers", name="Sinal (<3% no H)",
+                mode="markers", name="Sinal (<1% na semana)",
                 marker_symbol="x", marker_size=10
             ), row=1, col=1)
 
     fig.update_layout(
-        title=f"{normalize_ticker_b3(ticker_in)} — Cruzamentos EMA9/EMA21 e regra de 3% em H dias (com retornos long/short)",
+        title=f"{normalize_ticker_b3(ticker_in)} — Cruzamentos EMA9/EMA21 | Semana (5 pregões) alvo 1%",
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         margin=dict(l=20, r=20, t=50, b=20),
@@ -223,20 +249,27 @@ def plot_chart(df: pd.DataFrame, eval_df: pd.DataFrame, ticker_in: str):
     fig.update_yaxes(title_text="Preço", row=1, col=1)
     return fig
 
+def plot_weekly_success(weekly_df: pd.DataFrame):
+    if weekly_df is None or weekly_df.empty:
+        return None
+    import plotly.express as px
+    fig = px.bar(weekly_df, x="Semana", y="Taxa_Sucesso_%", hover_data=["Sinais","Acertos"],
+                 title="Taxa de sucesso semanal (≥1% em 5 pregões)")
+    return fig
+
 # ---------- UI ----------
-st.set_page_config(page_title="EMA9/21 — Regra 3% (B3)", layout="wide")
-st.title("Cruzamentos EMA9/EMA21 — Sucesso se atingir 3% em H dias (5/10/15/20) — Últimos 12 meses")
+st.set_page_config(page_title="EMA9/21 — Semana 1% (B3)", layout="wide")
+st.title("Cruzamentos EMA9/EMA21 — Sucesso se atingir 1% em 1 semana (5 pregões) — Últimos 12 meses")
 
 with st.sidebar:
-    st.markdown("### Parâmetros")
-    st.write("""
-- **Sinal**: cruzamento EMA9×EMA21 em qualquer direção.
-- **Sucesso**: dentro de **H** dias úteis após o sinal, o preço **atinge** ±3% a favor da direção (usa **HIGH** para ALTA e **LOW** para BAIXA).
-- **Saída**: na **primeira** barra que toca o alvo de 3%; caso contrário, usa D+H para avaliar.
-- **Sem** volume e **sem** EMA50.
+    st.markdown("### Regras fixas")
+    st.write(f"""
+- **Alta**: EMA9 cruza **para cima** EMA21 → sucesso se subir **≥ {THRESHOLD_PCT}%** em até **5 pregões**.
+- **Baixa**: EMA9 cruza **para baixo** EMA21 → sucesso se cair **≥ {THRESHOLD_PCT}%** em até **5 pregões**.
+- Saída no **primeiro toque** do alvo; se não tocar até D+5, marca como **não atingiu**.
+- Avaliação e agrupamento **semanal** (sem opção de horizonte).
     """)
-    horizon = st.selectbox("H (dias úteis):", [5, 10, 15, 20], index=0)
-    st.caption("Atingimento usa HIGH/LOW intradiário; retornos mostram 3% quando bate o alvo.")
+    st.caption("Sem volume / sem EMA50. Base diária, 12 meses.")
 
 ticker_in = st.text_input("Ticker (ex.: ITUB4, PETR4, VALE3)", value="ITUB4")
 
@@ -248,37 +281,44 @@ if st.button("Analisar", type="primary"):
         else:
             df = add_indicators(df_raw)
 
-            # Avaliar a regra de 3% no horizonte escolhido
-            eval_df = evaluate_three_percent_rule(df, horizon=horizon, threshold_pct=3.0)
-            summary = summarize_hits(eval_df)
+            eval_df = evaluate_weekly_threshold(df)
+            weekly = weekly_summary(eval_df)
+            overall = overall_counts(eval_df)
+            ret4w = asset_return_last_4_weeks(df)
 
-            # Gráfico
             fig = plot_chart(df, eval_df, ticker_in)
             st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader(f"Resultados no horizonte de {horizon} dias úteis")
-            if eval_df.empty:
-                st.info("Sem sinais suficientes (ou muito perto do fim da série para avaliar esse horizonte).")
+            st.subheader("Resumo geral (12 meses)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total de operações", overall.get("total", 0))
+            c2.metric("Acertos (≥1% na semana)", overall.get("hits", 0))
+            c3.metric("Não atingiram 1%", overall.get("misses", 0))
+            c4.metric("Taxa de sucesso geral (%)", overall.get("hit_pct_%", 0.0))
+
+            d1, d2 = st.columns(2)
+            d1.metric("ALTA — acertos/total", f"{overall.get('bull_hits',0)}/{overall.get('bull_total',0)}")
+            d2.metric("BAIXA — acertos/total", f"{overall.get('bear_hits',0)}/{overall.get('bear_total',0)}")
+
+            st.subheader("Percentual **semanal** de sucesso (sinais da semana)")
+            if weekly.empty:
+                st.info("Sem sinais suficientes para montar a série semanal.")
             else:
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total de operações", summary.get("n", 0))
-                c2.metric("Acertivas (≥3%)", summary.get("hits", 0))
-                c3.metric("Não atingiram 3%", summary.get("misses", 0))
-                c4.metric("Taxa de acerto (≥3%)", f"{summary.get('hit_pct_%', 0.0)}%")
+                figw = plot_weekly_success(weekly)
+                if figw is not None:
+                    st.plotly_chart(figw, use_container_width=True)
+                st.dataframe(weekly, use_container_width=True)
 
-                d1, d2 = st.columns(2)
-                d1.metric("Percentual ≥3%", f"{summary.get('hit_pct_%', 0.0)}%")
-                d2.metric("Percentual <3%", f"{summary.get('miss_pct_%', 0.0)}%")
+            st.subheader("Rendimento total do ativo em 4 semanas (~20 pregões)")
+            if ret4w is None:
+                st.info("Série insuficiente para calcular 4 semanas.")
+            else:
+                st.metric("Retorno 4 semanas (%)", ret4w)
 
-                st.caption("Quebra por direção (informativo)")
-                e1, e2 = st.columns(2)
-                e1.metric("ALTA — acertos/total", f"{summary.get('bull_hits', 0)}/{summary.get('bull_total', 0)}")
-                e2.metric("BAIXA — acertos/total", f"{summary.get('bear_hits', 0)}/{summary.get('bear_total', 0)}")
+            st.subheader("Operações (detalhe)")
+            if eval_df.empty:
+                st.info("Nenhuma operação avaliada.")
+            else:
+                st.dataframe(eval_df.sort_values("Data_Sinal"), use_container_width=True)
 
-                st.subheader("Operações (detalhe)")
-                st.dataframe(
-                    eval_df.sort_values("Data_Sinal"),
-                    use_container_width=True
-                )
-
-st.caption("⚠️ Base diária, últimos 12 meses. Sinais pelo fechamento de D; alvo de 3% avaliado por HIGH/LOW até D+H.")
+st.caption("⚠️ Sinais pelo fechamento de D; alvo de 1% avaliado por HIGH/LOW até D+5. Retorno do ativo em 4 semanas usa 20 pregões.")
