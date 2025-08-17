@@ -1,18 +1,5 @@
-# app.py (v2) — B3 EMA9/EMA21 + Volume EMA50 com correções para MultiIndex e dtypes
+# app.py (v3) — B3 EMA9/EMA21 + Volume EMA50 + Índice de Acerto
 # Requisitos: pip install streamlit yfinance plotly pandas python-dateutil
-
-# app.py (v2) — B3 EMA9/EMA21 + Volume EMA50 com correções para MultiIndex e dtypes
-# Requisitos: pip install streamlit yfinance plotly pandas python-dateutil
-
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import streamlit as st
-from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
-
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -48,7 +35,7 @@ def fetch_last_12m(ticker_raw: str) -> pd.DataFrame:
         auto_adjust=False,
         progress=False,
         interval="1d",
-        group_by="column",  # ajuda a evitar MultiIndex, mas ainda tratamos se vier
+        group_by="column",
     )
 
     if df.empty:
@@ -118,6 +105,57 @@ def extract_signals(df: pd.DataFrame) -> pd.DataFrame:
     sigs = sigs[["Signal", "Close", "Volume", "VolEMA50"]]
     sigs = sigs.rename(columns={"Close":"Fechamento"})
     return sigs
+
+def score_signals(df: pd.DataFrame, horizon: int = 10) -> pd.DataFrame:
+    """
+    Avalia o 'índice de acerto' usando uma regra simples:
+    - Para ALTA_CONFIRMADA: acerto se Close(t+h) > Close(t)
+    - Para BAIXA_CONFIRMADA: acerto se Close(t+h) < Close(t)
+    Retorno direcional (%): 
+      - bull: (Close_future / Close_entry - 1)
+      - bear: (Close_entry / Close_future - 1)  # positivo se cair
+    """
+    conf = df[(df["BullConfirmed"]) | (df["BearConfirmed"])].copy()
+    if conf.empty:
+        return pd.DataFrame()
+
+    conf["Entrada"] = conf["Close"]
+    conf["Tipo"] = np.where(conf["BullConfirmed"], "ALTA_CONFIRMADA", "BAIXA_CONFIRMADA")
+
+    rows = []
+    idx_list = conf.index.tolist()
+    for ts in idx_list:
+        if ts not in df.index:
+            continue
+        pos = df.index.get_loc(ts)
+        future_pos = pos + horizon
+        if future_pos >= len(df.index):
+            # sem dados suficientes para avaliar
+            continue
+        future_ts = df.index[future_pos]
+        close_entry = float(df.loc[ts, "Close"])
+        close_future = float(df.loc[future_ts, "Close"])
+        tipo = "ALTA_CONFIRMADA" if bool(df.loc[ts, "BullConfirmed"]) else "BAIXA_CONFIRMADA"
+
+        if tipo == "ALTA_CONFIRMADA":
+            acerto = close_future > close_entry
+            ret_dir = (close_future / close_entry) - 1.0
+        else:
+            acerto = close_future < close_entry
+            # retorno direcional positivo quando o preço cai (benefício de venda)
+            ret_dir = (close_entry / close_future) - 1.0
+
+        rows.append({
+            "Data_Sinal": ts,
+            "Tipo": tipo,
+            "Entrada": close_entry,
+            "Data_Avaliacao": future_ts,
+            "Close_Avaliacao": close_future,
+            f"Retorno_{horizon}d_%": round(ret_dir * 100.0, 2),
+            "Acertou": bool(acerto),
+        })
+
+    return pd.DataFrame(rows).sort_values("Data_Sinal")
 
 def summarize(df: pd.DataFrame, ticker_in: str) -> str:
     if df.empty:
@@ -189,7 +227,7 @@ def plot_chart(df: pd.DataFrame, ticker_in: str):
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         margin=dict(l=20, r=20, t=50, b=20),
-        height=720
+        height=760
     )
     fig.update_yaxes(title_text="Preço", row=1, col=1)
     fig.update_yaxes(title_text="Volume", row=2, col=1)
@@ -197,12 +235,13 @@ def plot_chart(df: pd.DataFrame, ticker_in: str):
 
 # ---------- UI ----------
 st.set_page_config(page_title="Análise Técnica B3 (EMA+Volume)", layout="wide")
-st.title("Análise Técnica B3: EMA9/EMA21 + Confirmação por Volume")
+st.title("Análise Técnica B3: EMA9/EMA21 + Volume + Índice de Acerto")
 
 with st.sidebar:
     st.markdown("### Como usar")
     st.write("Digite o **ticker** (ex.: ITUB4, PETR4, VALE3). O app adiciona automaticamente o sufixo **.SA**.")
-    st.caption("⚠️ Uso educacional. Não é recomendação de investimento.")
+    horizon = st.selectbox("Janela de avaliação do índice de acerto (dias úteis):", [5, 10, 20], index=1)
+    st.caption("⚠️ Uso educacional. Backtest simples (sem custos, slippage, nem gestão de risco).")
 
 ticker_in = st.text_input("Ticker (ex.: ITUB4, PETR4, VALE3)", value="ITUB4")
 
@@ -220,7 +259,7 @@ if st.button("Analisar", type="primary"):
             fig = plot_chart(df, ticker_in)
             st.plotly_chart(fig, use_container_width=True)
 
-            # Tabela de sinais
+            # Tabela de sinais (todos)
             sigs = extract_signals(df)
             st.subheader("Sinais detectados (últimos 12 meses)")
             if sigs.empty:
@@ -230,3 +269,35 @@ if st.button("Analisar", type="primary"):
                     sigs.reset_index(names=["Data"]),
                     use_container_width=True
                 )
+
+            # Índice de acerto (apenas sinais confirmados)
+            st.subheader(f"Índice de acerto — avaliação em {horizon} dias úteis (sinais confirmados)")
+            scored = score_signals(df, horizon=horizon)
+            if scored.empty:
+                st.info("Não há sinais confirmados suficientes para calcular o índice de acerto.")
+            else:
+                # Métricas
+                total = len(scored)
+                acertos = int(scored["Acertou"].sum())
+                hit_rate = round(100 * acertos / total, 2)
+
+                bull_scored = scored[scored["Tipo"] == "ALTA_CONFIRMADA"]
+                bear_scored = scored[scored["Tipo"] == "BAIXA_CONFIRMADA"]
+                hit_bull = round(100 * bull_scored["Acertou"].mean(), 2) if not bull_scored.empty else None
+                hit_bear = round(100 * bear_scored["Acertou"].mean(), 2) if not bear_scored.empty else None
+
+                mean_ret = round(scored[f"Retorno_{horizon}d_%"].mean(), 2)
+                mean_ret_bull = round(bull_scored[f"Retorno_{horizon}d_%"].mean(), 2) if not bull_scored.empty else None
+                mean_ret_bear = round(bear_scored[f"Retorno_{horizon}d_%"].mean(), 2) if not bear_scored.empty else None
+
+                colA, colB, colC = st.columns(3)
+                colA.metric("Hit rate total (%)", hit_rate)
+                colB.metric("Hit rate ALTA (%)", hit_bull if hit_bull is not None else 0.0)
+                colC.metric("Hit rate BAIXA (%)", hit_bear if hit_bear is not None else 0.0)
+
+                colD, colE, colF = st.columns(3)
+                colD.metric(f"Retorno médio {horizon}d (%)", mean_ret)
+                colE.metric(f"Ret. médio ALTA {horizon}d (%)", mean_ret_bull if mean_ret_bull is not None else 0.0)
+                colF.metric(f"Ret. médio BAIXA {horizon}d (%)", mean_ret_bear if mean_ret_bear is not None else 0.0)
+
+                st.dataframe(scored, use_container_width=True)
