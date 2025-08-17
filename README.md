@@ -1,20 +1,13 @@
-# EMA9/EMA21 + Volume (EMA50) — Ciclos confirmados e retornos (v8)
+# EMA9/EMA21 + Volume (EMA50) — v9
+- **Confirmação** no candle do cruzamento: `Volume ≥ EMA50(Volume)`
+- **Ciclos**: de entrada confirmada até o **próximo cruzamento**
+- **Avaliação por horizonte**: selecione **5/10/15/20** dias úteis para medir retornos e hit rate das **entradas confirmadas**
+- Gráficos: **Candlestick** diário (12 meses) com **EMA9/EMA21**, marcadores dos sinais confirmados, **Volume + EMA50**
 
-**Regras**
-- **Alta**: EMA9 cruza **para cima** EMA21.
-- **Baixa**: EMA9 cruza **para baixo** EMA21.
-- **Confirmação**: `Volume >= EMA50(Volume)` **no mesmo candle**.
-- **Ciclo**: começa no cruzamento **confirmado** e termina no **próximo cruzamento** (saída não exige confirmação).
-
-**Saídas do app**
-- Candlestick (diário, 12 meses) com **EMA9/EMA21**, marcadores de cruzamentos **confirmados**.
-- Gráfico de **Volume** + **EMA50(Volume)**.
-- **Taxas de confirmação** (alta/baixa/total).
-- Tabela de **ciclos confirmados** com **retorno (%)** do início ao fim e duração (barras).
-- Resumo com nº de ciclos, retorno médio/mediano e por direção.
-
-## Como rodar
+## Rodar
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+> Uso educacional. Fechamento como preço de avaliação; sem custos/slippage.

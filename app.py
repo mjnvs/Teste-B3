@@ -1,4 +1,4 @@
-# app.py (v8) — EMA9/EMA21 + Confirmação por Volume (EMA50) + Retorno por ciclo até o próximo cruzamento
+# app.py (v9) — EMA9/EMA21 + Volume (EMA50) | Ciclos + Avaliação por horizonte (5/10/15/20 dias)
 # Requisitos: pip install streamlit yfinance plotly pandas python-dateutil
 import pandas as pd
 import numpy as np
@@ -105,13 +105,6 @@ def compute_confirmation_rates(df: pd.DataFrame):
     }
 
 def compute_confirmed_cycles_returns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Constrói ciclos a partir de cruzamentos CONFIRMADOS (Volume >= EMA50 no candle do cruzamento)
-    e encerra no PRÓXIMO cruzamento (não exige confirmação na saída).
-    Retorno do ciclo:
-      - ALTA (bull): (Close_saida / Close_entrada - 1) * 100
-      - BAIXA (bear): (Close_entrada / Close_saida - 1) * 100
-    """
     events = []
     for ts, row in df.iterrows():
         if bool(row["BullConfirmed"]):
@@ -122,17 +115,14 @@ def compute_confirmed_cycles_returns(df: pd.DataFrame) -> pd.DataFrame:
     if len(events) == 0:
         return pd.DataFrame()
 
-    # Encontrar todos os cruzamentos (confirmados ou não) para determinar saídas
     cross_mask = df["BullCross"] | df["BearCross"]
     cross_dates = df.index[cross_mask]
 
     cycles = []
     for i in range(len(events)):
         entry = events[i]
-        # próxima data de cruzamento após a entrada
         later_crosses = [d for d in cross_dates if d > entry["date"]]
         if len(later_crosses) == 0:
-            # não há cruzamento seguinte — ciclo incompleto
             continue
         exit_dt = later_crosses[0]
 
@@ -145,7 +135,6 @@ def compute_confirmed_cycles_returns(df: pd.DataFrame) -> pd.DataFrame:
         else:
             ret = (entry_close / exit_close - 1.0) * 100.0
 
-        # duração em barras
         try:
             dur = int(df.index.get_loc(exit_dt) - df.index.get_loc(entry["date"]))
         except Exception:
@@ -180,6 +169,69 @@ def summarize_cycles(cycles: pd.DataFrame) -> dict:
         "avg_return_alta_%": avg_long,
         "avg_return_baixa_%": avg_short,
     }
+
+def evaluate_horizon_from_confirmed(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    rows = []
+    mask = df["BullConfirmed"] | df["BearConfirmed"]
+    idxs = df.index[mask]
+    for ts in idxs:
+        pos = df.index.get_loc(ts)
+        fpos = pos + horizon
+        if fpos >= len(df.index):
+            continue  # sem dados suficientes
+        ts_future = df.index[fpos]
+        entry = float(df.loc[ts, "Close"])
+        future = float(df.loc[ts_future, "Close"])
+        direcao = "ALTA" if bool(df.loc[ts, "BullConfirmed"]) else "BAIXA"
+        if direcao == "ALTA":
+            ret = (future / entry - 1.0) * 100.0
+            acertou = future > entry
+        else:
+            ret = (entry / future - 1.0) * 100.0
+            acertou = future < entry
+        rows.append({
+            "Data_Sinal": ts,
+            "Direcao": direcao,
+            "Entrada_Close": round(entry, 6),
+            "Data_Avaliacao": ts_future,
+            "Close_Avaliacao": round(future, 6),
+            f"Ret_{horizon}d_%": round(ret, 2),
+            "Acertou": bool(acertou),
+        })
+    return pd.DataFrame(rows)
+
+def summarize_horizon(df_eval: pd.DataFrame, horizon: int) -> dict:
+    if df_eval is None or df_eval.empty:
+        return {"n": 0}
+    n = len(df_eval)
+    hit = int(df_eval["Acertou"].sum())
+    hit_rate = round(100 * hit / n, 2)
+    avg_ret = round(df_eval[f"Ret_{horizon}d_%"].mean(), 2)
+    bull = df_eval[df_eval["Direcao"] == "ALTA"]
+    bear = df_eval[df_eval["Direcao"] == "BAIXA"]
+    hit_bull = round(100 * bull["Acertou"].mean(), 2) if not bull.empty else None
+    hit_bear = round(100 * bear["Acertou"].mean(), 2) if not bear.empty else None
+    avg_bull = round(bull[f"Ret_{horizon}d_%"].mean(), 2) if not bull.empty else None
+    avg_bear = round(bear[f"Ret_{horizon}d_%"].mean(), 2) if not bear.empty else None
+    return {
+        "n": n, "hit_rate_%": hit_rate, "avg_ret_%": avg_ret,
+        "hit_rate_bull_%": hit_bull, "hit_rate_bear_%": hit_bear,
+        "avg_ret_bull_%": avg_bull, "avg_ret_bear_%": avg_bear
+    }
+
+def extract_events_table(df: pd.DataFrame) -> pd.DataFrame:
+    events = []
+    for ts, row in df.iterrows():
+        if bool(row["BullCross"]) or bool(row["BearCross"]):
+            events.append({
+                "Data": ts,
+                "Tipo": "ALTA" if bool(row["BullCross"]) else "BAIXA",
+                "Fechamento": round(float(row["Close"]), 6),
+                "Volume": int(row["Volume"]),
+                "VolEMA50": round(float(row["VolEMA50"]), 2) if not np.isnan(row["VolEMA50"]) else None,
+                "Confirmado": bool(row["VolConfirm"])
+            })
+    return pd.DataFrame(events)
 
 def plot_chart(df: pd.DataFrame, cycles: pd.DataFrame, ticker_in: str):
     fig = make_subplots(
@@ -224,29 +276,30 @@ def plot_chart(df: pd.DataFrame, cycles: pd.DataFrame, ticker_in: str):
             fig.add_vrect(x0=tr["Entrada"], x1=tr["Saida"], fillcolor=color, line_width=0, row="all", col=1)
 
     fig.update_layout(
-        title=f"{normalize_ticker_b3(ticker_in)} — EMA9/21 + Volume (EMA50) | Ciclos confirmados e retornos",
+        title=f"{normalize_ticker_b3(ticker_in)} — EMA9/21 + Volume (EMA50) | Ciclos e Avaliação por Horizonte",
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         margin=dict(l=20, r=20, t=50, b=20),
-        height=800
+        height=820
     )
     fig.update_yaxes(title_text="Preço", row=1, col=1)
     fig.update_yaxes(title_text="Volume", row=2, col=1)
     return fig
 
 # ---------- UI ----------
-st.set_page_config(page_title="EMA9/21 + Volume (B3) — Ciclos", layout="wide")
-st.title("EMA9/EMA21 + Volume (EMA50) — Ciclos confirmados e retornos (12 meses, diário)")
+st.set_page_config(page_title="EMA9/21 + Volume (B3) — Ciclos + Horizonte", layout="wide")
+st.title("EMA9/EMA21 + Volume (EMA50) — Ciclos e Avaliação por Horizonte (12 meses, diário)")
 
 with st.sidebar:
-    st.markdown("### Regras")
+    st.markdown("### Regras (fixas)")
     st.write("""
 - **Alta**: EMA9 cruza **para cima** EMA21.
 - **Baixa**: EMA9 cruza **para baixo** EMA21.
 - **Confirmação**: `Volume >= EMA50(Volume)` **no mesmo candle**.
-- **Ciclo**: começa no cruzamento **confirmado** e termina no **próximo cruzamento** (não exige confirmação na saída).
+- **Ciclo**: começa no cruzamento **confirmado** e termina no **próximo cruzamento** (saída não exige confirmação).
     """)
-    st.caption("⚠️ Uso educacional. Não é recomendação de investimento.")
+    horizon = st.selectbox("Janela de avaliação (dias úteis):", [5, 10, 15, 20], index=0)
+    st.caption("A avaliação por horizonte usa o **fechamento** de D e D+H.")
 
 ticker_in = st.text_input("Ticker (ex.: ITUB4, PETR4, VALE3)", value="ITUB4")
 
@@ -264,6 +317,10 @@ if st.button("Analisar", type="primary"):
             # Ciclos confirmados e retornos
             cycles = compute_confirmed_cycles_returns(df)
             summary = summarize_cycles(cycles)
+
+            # Avaliação por horizonte (confirmed entries)
+            eval_h = evaluate_horizon_from_confirmed(df, horizon=horizon)
+            summ_h = summarize_horizon(eval_h, horizon=horizon)
 
             # Gráfico
             fig = plot_chart(df, cycles, ticker_in)
@@ -288,7 +345,22 @@ if st.button("Analisar", type="primary"):
                 c3.metric("Retorno mediano (%)", summary.get("median_return_%", 0.0))
                 c4.metric("Ret. médio ALTA / BAIXA (%)",
                           f"{summary.get('avg_return_alta_%', 0.0)} / {summary.get('avg_return_baixa_%', 0.0)}")
-
                 st.dataframe(cycles.sort_values("Entrada"), use_container_width=True)
 
-st.caption("⚠️ Base diária, últimos 12 meses. Retorno do ciclo usa preço de **fechamento** na entrada e na saída.")
+            st.subheader(f"Avaliação por horizonte de {horizon} dias úteis (apenas entradas confirmadas)")
+            if eval_h.empty:
+                st.info("Sem sinais confirmados suficientes para avaliar nesse horizonte (ou muito perto do fim da série).")
+            else:
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Entradas avaliadas", summ_h.get("n", 0))
+                k2.metric("Hit rate total (%)", summ_h.get("hit_rate_%", 0.0))
+                k3.metric("Retorno médio (%)", summ_h.get("avg_ret_%", 0.0))
+                k4.metric("Hit ALTA / BAIXA (%)", f"{summ_h.get('hit_rate_bull_%', 0.0)} / {summ_h.get('hit_rate_bear_%', 0.0)}")
+
+                k5, k6 = st.columns(2)
+                k5.metric("Ret. médio ALTA (%)", summ_h.get("avg_ret_bull_%", 0.0) if summ_h.get("avg_ret_bull_%") is not None else 0.0)
+                k6.metric("Ret. médio BAIXA (%)", summ_h.get("avg_ret_bear_%", 0.0) if summ_h.get("avg_ret_bear_%") is not None else 0.0)
+
+                st.dataframe(eval_h.sort_values("Data_Sinal"), use_container_width=True)
+
+st.caption("⚠️ Base diária, últimos 12 meses. Avaliação em H dias usa **fechamento** de D e D+H; ciclos usam próximo cruzamento.")
