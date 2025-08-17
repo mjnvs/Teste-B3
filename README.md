@@ -1,17 +1,18 @@
-# EMA9/EMA21 — Só cruzamentos (sem volume) — v10
+# EMA9/EMA21 — Regra de 3% em H dias (v11)
 
-**Regras**
-- **Alta**: EMA9 cruza **para cima** EMA21.
-- **Baixa**: EMA9 cruza **para baixo** EMA21.
-- **Sem confirmação por volume** (não usa Volume nem EMA50).
-- **Ciclo**: de um cruzamento ao próximo (saída no próximo cruzamento).
+**Regra**
+- Sinal: cruzamento **EMA9×EMA21** (alta/baixa).
+- Sucesso: dentro de **H = 5/10/15/20** dias úteis após o sinal, o preço **atinge** **±3%** a favor da direção.
+  - ALTA: usa **HIGH** para detectar toque em **+3%**.
+  - BAIXA: usa **LOW** para detectar toque em **−3%**.
+  - Saída no **primeiro toque**; se não tocar até D+H, marca como não atingiu (usa o fechamento de D+H para referência).
+- **Sem** volume e **sem** EMA50.
 
-**Análises**
-- **Ciclos**: retorno (%) do início ao fim do ciclo e duração (barras).
-- **Horizonte**: escolha **5/10/15/20** dias úteis para medir retorno & hit rate a partir de cada cruzamento.
-
-**Gráfico**
-- Candlestick diário (12 meses) com **EMA9/EMA21**, marcadores de cruzamentos, candles **verdes** (alta) e **vermelhos** (baixa).
+**Saídas**
+- **Nº de operações** acertivas (≥3%) e **não atingiram 3%**.
+- **Percentuais** de ≥3% e <3%.
+- Tabela detalhada (data do sinal, direção, preço de entrada, H, atingiu?, data/ preço de saída, barras até o evento, retorno no evento).
+- Gráfico: candlestick (diário, 12 meses) + EMA9/EMA21, marcadores de sucesso (★) e falha (×).
 
 ## Rodar
 ```bash
