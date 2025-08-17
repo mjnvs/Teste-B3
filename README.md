@@ -1,21 +1,17 @@
-# EMA9/EMA21 — Regra de 3% em H dias (v11)
+# EMA9/EMA21 — Regra de 3% em H dias — v12
 
-**Regra**
-- Sinal: cruzamento **EMA9×EMA21** (alta/baixa).
-- Sucesso: dentro de **H = 5/10/15/20** dias úteis após o sinal, o preço **atinge** **±3%** a favor da direção.
-  - ALTA: usa **HIGH** para detectar toque em **+3%**.
-  - BAIXA: usa **LOW** para detectar toque em **−3%**.
-  - Saída no **primeiro toque**; se não tocar até D+H, marca como não atingiu (usa o fechamento de D+H para referência).
-- **Sem** volume e **sem** EMA50.
+**Novidade**
+- Colunas **Ret_long_%** e **Ret_short_%** para cada operação:
+  - **Ret_long_%**  = (Saída/Entrada − 1) × 100
+  - **Ret_short_%** = (Entrada/Saída − 1) × 100
+- **Ret_%_direcao** mantém a leitura direcional (ALTA = long, BAIXA = short). Se bater o alvo, vale **3,00%** por definição.
+
+**Regras**
+- Cruzamento **EMA9×EMA21** (alta/baixa).
+- Sucesso se tocar **±3%** a favor da direção em **H = 5/10/15/20** dias úteis.
+- Saída no **primeiro toque**; senão usa **D+H**.
 
 **Saídas**
-- **Nº de operações** acertivas (≥3%) e **não atingiram 3%**.
-- **Percentuais** de ≥3% e <3%.
-- Tabela detalhada (data do sinal, direção, preço de entrada, H, atingiu?, data/ preço de saída, barras até o evento, retorno no evento).
-- Gráfico: candlestick (diário, 12 meses) + EMA9/EMA21, marcadores de sucesso (★) e falha (×).
-
-## Rodar
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+- Totais de **acertivas** (≥3%) e **não atingiram** 3%, mais **percentuais**.
+- Tabela detalhada com **Ret_long_%**, **Ret_short_%** e **Ret_%_direcao**.
+- Gráfico candlestick + EMAs com marcadores de sucesso/fracasso.

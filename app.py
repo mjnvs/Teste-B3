@@ -1,4 +1,4 @@
-# app.py (v11) — EMA9/EMA21 + Regra de 3% em H dias (5/10/15/20) — sem volume
+# app.py (v12) — EMA9/EMA21 + Regra de 3% (H=5/10/15/20) — com Ret_long_% e Ret_short_%
 # Requisitos: pip install streamlit yfinance plotly pandas python-dateutil
 
 import pandas as pd
@@ -76,12 +76,14 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def evaluate_three_percent_rule(df: pd.DataFrame, horizon: int, threshold_pct: float = 3.0) -> pd.DataFrame:
     """
     Para cada cruzamento:
-      - Direção ALTA (BullCross): sucesso se, dentro de H dias, o **HIGH** tocar >= Entry * (1+3%).
-      - Direção BAIXA (BearCross): sucesso se, dentro de H dias, o **LOW** tocar <= Entry * (1-3%).
-      - Saída: na primeira barra que tocar o alvo (3%).
-      - Se não tocar até H dias, marcar como 'Não atingiu 3%' e usar D+H como data de avaliação.
-    Retornos reportados:
-      - 'Ret_%_no_evento': 3.00 se atingiu; senão o retorno direcional em D→D+H.
+      - Direção ALTA: sucesso se, dentro de H dias, o HIGH tocar >= Entry * (1+3%).
+      - Direção BAIXA: sucesso se, dentro de H dias, o LOW  tocar <= Entry * (1-3%).
+      - Saída no primeiro toque; senão usa D+H.
+    Colunas extra:
+      - Ret_long_%  = (Exit / Entry - 1) * 100
+      - Ret_short_% = (Entry / Exit - 1) * 100
+      - Ret_%_direcao = retorno direcional (LONG para ALTA, SHORT para BAIXA);
+                        se bater o alvo, vale 3.00 por definição.
     """
     rows = []
     mask = df["BullCross"] | df["BearCross"]
@@ -93,10 +95,9 @@ def evaluate_three_percent_rule(df: pd.DataFrame, horizon: int, threshold_pct: f
         entry = float(df.loc[ts, "Close"])
         direcao = "ALTA" if bool(df.loc[ts, "BullCross"]) else "BAIXA"
 
-        # Janela de avaliação: dias (1..H) após o sinal
+        # Janela de avaliação
         fpos = pos + horizon
         if fpos >= len(df.index):
-            # janela incompleta no fim da série -> ignora
             continue
 
         window = df.iloc[pos+1:fpos+1]  # inclui D+H
@@ -106,12 +107,11 @@ def evaluate_three_percent_rule(df: pd.DataFrame, horizon: int, threshold_pct: f
 
         if direcao == "ALTA":
             target = entry * (1.0 + thr)
-            # primeira barra onde HIGH >= target
             hit_idx = window.index[window["High"] >= target]
             if len(hit_idx) > 0:
                 hit = True
                 exit_dt = hit_idx[0]
-                exit_price = target  # considera preço alvo atingido
+                exit_price = target
             else:
                 exit_dt = df.index[fpos]
                 exit_price = float(df.loc[exit_dt, "Close"])
@@ -126,15 +126,18 @@ def evaluate_three_percent_rule(df: pd.DataFrame, horizon: int, threshold_pct: f
                 exit_dt = df.index[fpos]
                 exit_price = float(df.loc[exit_dt, "Close"])
 
-        # retorno
+        # Retornos
+        ret_long = (exit_price / entry - 1.0) * 100.0
+        ret_short = (entry / exit_price - 1.0) * 100.0
+
         if hit:
-            ret = threshold_pct  # por definição: alvo de 3%
+            ret_dir = threshold_pct  # por definição
             bars_to = int(df.index.get_loc(exit_dt) - pos)
         else:
             if direcao == "ALTA":
-                ret = (exit_price / entry - 1.0) * 100.0
+                ret_dir = ret_long
             else:
-                ret = (entry / exit_price - 1.0) * 100.0
+                ret_dir = ret_short
             bars_to = int(horizon)
 
         rows.append({
@@ -146,7 +149,9 @@ def evaluate_three_percent_rule(df: pd.DataFrame, horizon: int, threshold_pct: f
             "Data_Fechamento_Operacao": exit_dt,
             "Preco_Saida": round(exit_price, 6),
             "Barras_ate_evento": bars_to,
-            "Ret_%_no_evento": round(ret, 2),
+            "Ret_long_%": round(ret_long, 2),
+            "Ret_short_%": round(ret_short, 2),
+            "Ret_%_direcao": round(ret_dir, 2),
         })
 
     return pd.DataFrame(rows)
@@ -159,7 +164,6 @@ def summarize_hits(df_eval: pd.DataFrame) -> dict:
     misses = n - hits
     hit_pct = round(100.0 * hits / n, 2)
     miss_pct = round(100.0 * misses / n, 2)
-    # por direção (opcional)
     bull = df_eval[df_eval["Direcao"] == "ALTA"]
     bear = df_eval[df_eval["Direcao"] == "BAIXA"]
     bh = int(bull["Atingiu_3pct"].sum())
@@ -210,7 +214,7 @@ def plot_chart(df: pd.DataFrame, eval_df: pd.DataFrame, ticker_in: str):
             ), row=1, col=1)
 
     fig.update_layout(
-        title=f"{normalize_ticker_b3(ticker_in)} — Cruzamentos EMA9/EMA21 e regra de 3% em H dias",
+        title=f"{normalize_ticker_b3(ticker_in)} — Cruzamentos EMA9/EMA21 e regra de 3% em H dias (com retornos long/short)",
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         margin=dict(l=20, r=20, t=50, b=20),
@@ -272,6 +276,9 @@ if st.button("Analisar", type="primary"):
                 e2.metric("BAIXA — acertos/total", f"{summary.get('bear_hits', 0)}/{summary.get('bear_total', 0)}")
 
                 st.subheader("Operações (detalhe)")
-                st.dataframe(eval_df.sort_values("Data_Sinal"), use_container_width=True)
+                st.dataframe(
+                    eval_df.sort_values("Data_Sinal"),
+                    use_container_width=True
+                )
 
 st.caption("⚠️ Base diária, últimos 12 meses. Sinais pelo fechamento de D; alvo de 3% avaliado por HIGH/LOW até D+H.")
